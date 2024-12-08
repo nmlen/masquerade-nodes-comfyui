@@ -727,52 +727,27 @@ class CutByMask:
             assert(B % MB == 0)
             mask = mask.repeat(B // MB, 1, 1)
 
-        # masks_to_boxes errors if the tensor is all zeros, so we'll add a single pixel and zero it out at the end
-        is_empty = ~torch.gt(torch.max(torch.reshape(mask,[MB, H * W]), dim=1).values, 0.)
-        mask[is_empty,0,0] = 1.
-        boxes = masks_to_boxes(mask)
-        mask[is_empty,0,0] = 0.
+        # Multiply the image by the mask to retain only the masked regions
+        alpha_channel = mask.unsqueeze(-1)  # Add an alpha channel based on the mask
+        masked_image = image.clone()
 
-        min_x = boxes[:,0]
-        min_y = boxes[:,1]
-        max_x = boxes[:,2]
-        max_y = boxes[:,3]
+        # Apply the mask to the RGB channels as well
+        masked_image[:, :, :, 3] *= alpha_channel.squeeze(-1)
 
-        width = max_x - min_x + 1
-        height = max_y - min_y + 1
+        # If force_resize_width or force_resize_height is provided, resize the output image
+        if force_resize_width > 0 or force_resize_height > 0:
+            target_width = force_resize_width if force_resize_width > 0 else W
+            target_height = force_resize_height if force_resize_height > 0 else H
+            resized_image = torch.nn.functional.interpolate(
+                masked_image.permute(0, 3, 1, 2),  # Change shape to (B, C, H, W) for resizing
+                size=(target_height, target_width),
+                mode='bicubic'
+            ).permute(0, 2, 3, 1)  # Change back to (B, H, W, C)
+            return (resized_image,)
 
-        use_width = int(torch.max(width).item())
-        use_height = int(torch.max(height).item())
+        # Otherwise, return the image with its original dimensions
+        return (masked_image,)
 
-        if force_resize_width > 0:
-            use_width = force_resize_width
-
-        if force_resize_height > 0:
-            use_height = force_resize_height
-
-        alpha_mask = torch.ones((B, H, W, 4))
-        alpha_mask[:,:,:,3] = mask
-
-        image = image * alpha_mask
-
-        result = torch.zeros((B, use_height, use_width, 4))
-        for i in range(0, B):
-            if not is_empty[i]:
-                ymin = int(min_y[i].item())
-                ymax = int(max_y[i].item())
-                xmin = int(min_x[i].item())
-                xmax = int(max_x[i].item())
-                single = (image[i, ymin:ymax+1, xmin:xmax+1,:]).unsqueeze(0)
-                resized = torch.nn.functional.interpolate(single.permute(0, 3, 1, 2), size=(use_height, use_width), mode='bicubic').permute(0, 2, 3, 1)
-                result[i] = resized[0]
-
-        # Preserve our type unless we were previously RGB and added non-opaque alpha due to the mask size
-        if C == 1:
-            return (tensor2mask(result),)
-        elif C == 3 and torch.min(result[:,:,:,3]) == 1:
-            return (tensor2rgb(result),)
-        else:
-            return (result,)
 
 class SeparateMaskComponents:
     """
